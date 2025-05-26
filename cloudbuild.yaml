@@ -75,3 +75,8 @@ steps:
           echo "Deployment failed. Service did not start."
           exit 1
         fi
+options:
+  logging: CLOUD_LOGGING_ONLY
+  defaultLogsBucketBehavior: REGIONAL_USER_OWNED_BUCKET       
+        
+        
