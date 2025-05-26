@@ -1,76 +1,77 @@
-#!/bin/bash
+steps:
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - -c
+      - |
+        # ====== CONFIGURATION ======
+        SERVICE_NAME="byf-ai"
+        PROJECT_ID="byf-dev"
+        BUCKET_NAME="backend-services-dev"
+        REGION="asia-southeast1"
 
-# ====== CONFIGURATION ======
-SERVICE_NAME="byf-ai"
-PROJECT_ID="byf-dev"
-BUCKET_NAME="backend-services-dev"
-REGION="asia-southeast1"
+        # ====== DERIVED VARIABLES ======
+        APP_DIR="/home/ubuntu/Middleware/shark-prod-$$SERVICE_NAME"
+        BACKUP_DIR="/home/ubuntu/shark-prod-$$SERVICE_NAME-backup"
+        TMP_DIR="/home/ubuntu/$$SERVICE_NAME-tmp"
+        BUCKET_PATH="gs://$$BUCKET_NAME/$$SERVICE_NAME/"
+        ENV_SECRET_NAME="prod-$${SERVICE_NAME//-/}env"
+        SA_SECRET_NAME="prod-$${SERVICE_NAME//-/}serviceaccount"
+        VENV_PATH="/home/ubuntu/venv/fastapi3.11"
+        PYTHON_INDEX_URL="https://$$REGION-python.pkg.dev/$$PROJECT_ID/$$SERVICE_NAME-python-package/simple/"
 
-# ====== DERIVED VARIABLES ======
-APP_DIR="/home/ubuntu/Middleware/shark-prod-$${SERVICE_NAME}"
-BACKUP_DIR="/home/ubuntu/shark-prod-$${SERVICE_NAME}-backup"
-TMP_DIR="/home/ubuntu/$${SERVICE_NAME}-tmp"
-BUCKET_PATH="gs://$${BUCKET_NAME}/$${SERVICE_NAME}/"
-ENV_SECRET_NAME="prod-$${SERVICE_NAME//-/}env"
-SA_SECRET_NAME="prod-$${SERVICE_NAME//-/}serviceaccount"
-VENV_PATH="/home/ubuntu/venv/fastapi3.11"
-PYTHON_INDEX_URL="https://$${REGION}-python.pkg.dev/$${PROJECT_ID}/$${SERVICE_NAME}-python-package/simple/"
+        if systemctl is-active --quiet "$$SERVICE_NAME"; then
+          echo "Stopping service $$SERVICE_NAME ..."
+          sudo service "$$SERVICE_NAME" stop
+        else
+          echo "Service $$SERVICE_NAME is not running."
+        fi
 
-# ====== STOP SERVICE IF RUNNING ======
-if systemctl is-active --quiet "$${SERVICE_NAME}"; then
-  echo "Stopping service $${SERVICE_NAME} ..."
-  sudo service "$${SERVICE_NAME}" stop
-else
-  echo "Service $${SERVICE_NAME} is not running."
-fi
+        if ! systemctl is-active --quiet "$$SERVICE_NAME"; then
+          cd /home/ubuntu || exit 1
 
-# ====== ONLY CONTINUE IF SERVICE IS STOPPED ======
-if ! systemctl is-active --quiet "$${SERVICE_NAME}"; then
-  cd /home/ubuntu || exit 1
+          echo "Backing up current app..."
+          rm -rf "$$BACKUP_DIR"
+          mkdir "$$BACKUP_DIR"
+          cp -rf "$$APP_DIR/"* "$$BACKUP_DIR/"
 
-  echo "Backing up current app..."
-  rm -rf "$${BACKUP_DIR}"
-  mkdir "$${BACKUP_DIR}"
-  cp -rf "$${APP_DIR}/"* "$${BACKUP_DIR}/"
+          echo "Downloading dist files from GCS bucket..."
+          mkdir -p "$$TMP_DIR/dist/"
+          gsutil -m rsync -r "$$BUCKET_PATH" "$$TMP_DIR/dist/"
 
-  echo "Downloading dist files from GCS bucket..."
-  mkdir -p "$${TMP_DIR}/dist/"
-  gsutil -m rsync -r "$${BUCKET_PATH}" "$${TMP_DIR}/dist/"
+          echo "Deploying new files..."
+          cp -rf "$$TMP_DIR/dist/"* "$$APP_DIR/"
 
-  echo "Deploying new files..."
-  cp -rf "$${TMP_DIR}/dist/"* "$${APP_DIR}/"
+          cd "$$APP_DIR" || exit 1
 
-  cd "$${APP_DIR}" || exit 1
+          echo "Fetching secrets..."
+          gcloud secrets versions access latest --secret="$$ENV_SECRET_NAME" > .env
+          gcloud secrets versions access latest --secret="$$SA_SECRET_NAME" > service-account.json
 
-  echo "Fetching secrets..."
-  gcloud secrets versions access latest --secret="$${ENV_SECRET_NAME}" > .env
-  gcloud secrets versions access latest --secret="$${SA_SECRET_NAME}" > service-account.json
+          echo "Preparing directories..."
+          mkdir -p static logs
 
-  echo "Preparing directories..."
-  mkdir -p static logs
+          echo "Fixing permissions..."
+          chown -R ubuntu:ubuntu .
 
-  echo "Fixing permissions..."
-  chown -R ubuntu:ubuntu .
+          echo "Activating Python environment and installing dependencies..."
+          source "$$VENV_PATH/bin/activate"
+          pip config set global.index-url "$$PYTHON_INDEX_URL"
+          pip install -r requirements_linux.txt
+          chown -R ubuntu:ubuntu "$$VENV_PATH"
 
-  echo "Activating Python environment and installing dependencies..."
-  source "$${VENV_PATH}/bin/activate"
-  pip config set global.index-url "$${PYTHON_INDEX_URL}"
-  pip install -r requirements_linux.txt
-  chown -R ubuntu:ubuntu "$${VENV_PATH}"
+          echo "Starting service..."
+          sudo service "$$SERVICE_NAME" start
+        else
+          echo "Service still running. Aborting deployment."
+          exit 1
+        fi
 
-  echo "Starting service..."
-  sudo service "$${SERVICE_NAME}" start
-else
-  echo "Service still running. Aborting deployment."
-  exit 1
-fi
-
-# ====== VALIDATE AND CLEANUP ======
-sleep 10
-if systemctl is-active --quiet "$${SERVICE_NAME}"; then
-  echo "Deployment successful. Cleaning up..."
-  rm -rf "$${BACKUP_DIR}" "$${TMP_DIR}"
-else
-  echo "Deployment failed. Service did not start."
-  exit 1
-fi
+        sleep 10
+        if systemctl is-active --quiet "$$SERVICE_NAME"; then
+          echo "Deployment successful. Cleaning up..."
+          rm -rf "$$BACKUP_DIR" "$$TMP_DIR"
+        else
+          echo "Deployment failed. Service did not start."
+          exit 1
+        fi
